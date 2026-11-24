@@ -4,7 +4,7 @@
  * Copiare in  homeassistant/www/casa-panel.js  (sulla scheda dell'AI Hub)
  * Risorsa:    /local/casa-panel.js?v=1   (tipo: Modulo JavaScript)
  */
-const CP_VERSION = '1.1.0';
+const CP_VERSION = '1.2.0';
 
 /* ---------- utilità ---------- */
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -25,6 +25,14 @@ const WX = {
 const lvl = (v, a, b) => (v == null || isNaN(v) ? 'sub' : v < a ? 'ok' : v < b ? 'warn' : 'bad');
 const glob = (p) => new RegExp('^' + p.split('*').map((s) => s.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$');
 const spUri = (u) => { const m = String(u).match(/open\.spotify\.com\/(?:intl-[a-z]+\/)?(playlist|album|artist|track|show)\/([A-Za-z0-9]+)/); return m ? `spotify:${m[1]}:${m[2]}` : String(u).trim(); };
+const VAC_ST = { cleaning: 'In pulizia', docked: 'In base', returning: 'Rientro alla base', paused: 'In pausa', idle: 'Fermo', error: 'Errore', unavailable: 'Non raggiungibile' };
+const STATION_ST = { idle: 'Pronta', emptying: 'Svuotamento', washing: 'Lavaggio mocio', drying: 'Asciugatura mocio', cleaning: 'In lavaggio', refilling: 'Riempimento' };
+const FAN_LBL = { quiet: 'Silenzioso', normal: 'Standard', max: 'Max', max_plus: 'Max+', standard: 'Standard', strong: 'Forte' };
+const PART_LBL = { dust_bucket_lifespan: 'Contenitore polvere', dust_container_filter_lifespan: 'Filtro contenitore', heavy_duty_cleaning_solution_lifespan: 'Soluzione intensiva',
+  mop_washing_tray_lifespan: 'Vaschetta lavaggio mocio', strainer_lifespan: 'Filtro acqua', unit_care_lifespan: 'Manutenzione unità' };
+const BTN_LBL = { trasferire: ['Riposiziona robot', 'mdi:map-marker-question-outline'], asciuga_il_mocio: ['Asciuga mocio', 'mdi:weather-windy'], svuota_contenitore_della_polvere: ['Svuota polvere', 'mdi:delete-empty-outline'],
+  wash_mop: ['Lava mocio', 'mdi:water-sync'], relocate: ['Riposiziona', 'mdi:map-marker-question'] };
+const ROOM_IC = { cameretta: 'mdi:teddy-bear', studio: 'mdi:desk', camera_da_letto: 'mdi:bed-king', atrio: 'mdi:door-open', bagno: 'mdi:shower', cucina: 'mdi:stove', soggiorno: 'mdi:sofa', sala: 'mdi:sofa', corridoio: 'mdi:shoe-print' };
 const COMANDI_ESCLUSI_DEFAULT = ['*child_lock*', '*blocco_bambini*', '*_display', '*indicatore_led*', '*night_light*', 'light.*air_purifier*'];
 
 /* ---------- grafici SVG ---------- */
@@ -98,6 +106,8 @@ class CasaPanel extends HTMLElement {
     c.escludi = (c.escludi || []).map(glob);
     c.escludi_comandi = [...COMANDI_ESCLUSI_DEFAULT, ...(c.escludi_comandi || [])].map(glob);
     c.soglia_batteria = Number(c.soglia_batteria ?? 20);
+    c.robot = c.robot ? (typeof c.robot === 'string' ? { entita: c.robot } : c.robot) : null;
+    this._rooms = new Set(); this._passes = 1;
     c.musica = c.musica || {};
     c.musica.playlist = (c.musica.playlist || []).map((x) => ({ ...x, uri: spUri(x.uri || x.link || '') }));
     c.musica.radio = c.musica.radio || [];
@@ -261,6 +271,15 @@ class CasaPanel extends HTMLElement {
       case 'radio-alexa': { const r = this._cfg.musica.radio[+d.i]; const ax = this._cfg.musica.alexa; if (r && ax) h.callService('media_player', 'play_media', { entity_id: ax, media_content_type: 'custom', media_content_id: r.comando_alexa || `metti ${r.nome}` }); break; }
       case 'radio-min': this._dock.classList.toggle('min'); break;
       case 'radio-close': this._radio = null; this._dock.innerHTML = ''; this._dock.className = 'dock'; if (this._tab === 'musica') this._render(true); break;
+      case 'vac': this._guard(() => h.callService('vacuum', d.s, { entity_id: d.id, ...(d.v != null ? JSON.parse(d.v) : {}) })); break;
+      case 'room': { const k = d.k; if (this._rooms.has(k)) this._rooms.delete(k); else this._rooms.add(k); this._render(true); break; }
+      case 'passes': this._passes = this._passes === 1 ? 2 : 1; this._render(true); break;
+      case 'rooms-go': { const R = this._robot(); if (!R || !this._rooms.size) break; const rooms = [...this._rooms].map((k) => R.rooms[k]).filter((x) => x != null).join(',');
+        this._guard(() => h.callService('vacuum', 'send_command', { entity_id: R.id, command: 'spot_area', params: { rooms, cleanings: this._passes } }).then(() => { this._rooms.clear(); this._render(true); })); break; }
+      case 'press': this._guard(() => h.callService('button', 'press', { entity_id: d.id }), d.conf === '1', d.label); break;
+      case 'num': { const st = this._st(d.id); if (!st) break; const a = st.attributes; const v = Math.min(a.max ?? 100, Math.max(a.min ?? 0, Number(st.state) + Number(d.d)));
+        this._guard(() => h.callService('number', 'set_value', { entity_id: d.id, value: v })); break; }
+      case 'sel': this._guard(() => h.callService('select', 'select_option', { entity_id: d.id, option: d.o })); break;
       case 'confirm-yes': { const p = this._pending; this._pending = null; this._modal = null; this._renderModal(); if (p) p(); break; }
     }
   }
@@ -326,6 +345,7 @@ class CasaPanel extends HTMLElement {
     c.comandi_rapidi.forEach((q) => ids.push(q.entita));
     c.telecamere.forEach((t) => ids.push(t.entita));
     c.elettrodomestici.forEach((a) => a.potenza && ids.push(a.potenza));
+    if (c.robot) ids.push(c.robot.entita);
     return [...new Set(ids)];
   }
   _alerts() {
@@ -340,6 +360,12 @@ class CasaPanel extends HTMLElement {
     const off = this._configuredIds().filter((id) => !this._ok(id));
     if (off.length) A.push({ l: 'warn', i: 'mdi:lan-disconnect', t: `${off.length} ${off.length === 1 ? 'dispositivo non raggiungibile' : 'dispositivi non raggiungibili'}`, s: off.slice(0, 3).map((id) => this._name(id)).join(', '), go: 'avvisi' });
     const upd = Object.values(this._hass.states).filter((x) => x.entity_id.startsWith('update.') && x.state === 'on');
+    const R = this._robot();
+    if (R) {
+      if (this._v(R.id) === 'error') A.push({ l: 'bad', i: 'mdi:robot-vacuum-alert', t: `${R.nome}: errore`, s: 'Controlla il robot', go: 'robot' });
+      const worn = R.parts.filter((x) => x.v != null && x.v <= 10);
+      if (worn.length) A.push({ l: 'info', i: 'mdi:wrench-outline', t: `${R.nome}: ${worn.length === 1 ? 'un ricambio' : worn.length + ' ricambi'} da sostituire`, s: worn.map((x) => `${x.nome} ${fmt(x.v)}%`).join(', '), go: 'robot' });
+    }
     if (upd.length) A.push({ l: 'info', i: 'mdi:update', t: upd.length === 1 ? '1 aggiornamento disponibile' : `${upd.length} aggiornamenti disponibili`, s: upd.slice(0, 2).map((x) => x.attributes.friendly_name).join(', '), go: 'avvisi' });
     const rank = { bad: 0, warn: 1, info: 2 };
     return A.sort((a, b) => rank[a.l] - rank[b.l]);
@@ -352,14 +378,14 @@ class CasaPanel extends HTMLElement {
     const alerts = this._alerts();
     const tabs = [
       ['casa', 'mdi:home-outline', 'Casa'], ['clima', 'mdi:thermometer', 'Clima'], ['energia', 'mdi:lightning-bolt-outline', 'Energia'],
-      ['telecamere', 'mdi:cctv', 'Telecamere'], ['aria', 'mdi:air-purifier', 'Purificatori'], ['musica', 'mdi:music', 'Musica'], ['comandi', 'mdi:gesture-tap-button', 'Comandi'],
+      ['telecamere', 'mdi:cctv', 'Telecamere'], ['aria', 'mdi:air-purifier', 'Purificatori'], ...(this._cfg.robot ? [['robot', 'mdi:robot-vacuum', 'Robot']] : []), ['musica', 'mdi:music', 'Musica'], ['comandi', 'mdi:gesture-tap-button', 'Comandi'],
     ];
     const lockIc = this._cfg.blocco ? (this._locked() ? 'mdi:lock-outline' : 'mdi:lock-open-variant-outline') : null;
     this._nav.innerHTML = tabs.map(([id, i, l]) => `<button class="tb ${this._tab === id ? 'on' : ''}" data-a="tab" data-t="${id}">${ic(i)}<span>${l}</span></button>`).join('')
       + `<span class="sp"></span>`
       + (lockIc ? `<button class="tb ico ${this._locked() ? '' : 'unl'}" data-a="${this._locked() ? 'unlock' : 'lock'}" title="${this._locked() ? 'Sblocca' : 'Blocca ora'}">${ic(lockIc)}</button>` : '')
       + `<button class="tb ico ${this._tab === 'avvisi' ? 'on' : ''}" data-a="tab" data-t="avvisi">${ic('mdi:bell-outline')}${alerts.length ? `<b class="badge ${alerts[0].l}">${alerts.length}</b>` : ''}</button>`;
-    const fn = { casa: this._vCasa, clima: this._vClima, energia: this._vEnergia, telecamere: this._vCam, aria: this._vAria, comandi: this._vComandi, musica: this._vMusica, avvisi: this._vAvvisi }[this._tab] || this._vCasa;
+    const fn = { casa: this._vCasa, clima: this._vClima, energia: this._vEnergia, telecamere: this._vCam, aria: this._vAria, comandi: this._vComandi, musica: this._vMusica, robot: this._vRobot, avvisi: this._vAvvisi }[this._tab] || this._vCasa;
     this._main.innerHTML = `<section class="view v-${this._tab}">${fn.call(this, alerts)}</section>`;
   }
 
@@ -441,7 +467,7 @@ class CasaPanel extends HTMLElement {
       ${meteo}
       <div class="card days"><div class="ctl">Prossimi giorni</div><div class="drow">${giorni || '<span class="sub">…</span>'}</div></div>
       <div class="span2">${strip}</div>
-      <div class="apps">${app}</div>
+      <div class="apps">${app}${this._robotMini()}</div>
       <div class="span2">${power}</div>
       <div class="rooms span3">${rooms}</div>
       <div class="quick span3">${quick}</div>
@@ -589,6 +615,75 @@ class CasaPanel extends HTMLElement {
     </div>`;
   }
 
+  /* ===== ROBOT ===== */
+  _robot() {
+    const c = this._cfg.robot; if (!c || !this._hass) return null;
+    const v = this._st(c.entita); if (!v) return { id: c.entita, nome: c.nome || 'Robot', missing: true, parts: [], rooms: {} };
+    const obj = c.entita.split('.')[1], P = (dom) => Object.keys(this._hass.states).filter((k) => k.startsWith(`${dom}.${obj}_`));
+    const find = (dom, suf) => (c[suf] || `${dom}.${obj}_${suf}`);
+    const sens = P('sensor');
+    const parts = sens.filter((k) => this._u(k) === '%' && !/batteria|battery/.test(k)).map((k) => {
+      const suf = k.slice(`sensor.${obj}_`.length);
+      let n = PART_LBL[suf] || (this._name(k) || suf).replace(new RegExp('^' + (v.attributes.friendly_name || '') + '\\s*', 'i'), '').replace(/^durata (della |del |dello |dell')?/i, '').replace(/ lifespan$/i, '');
+      return { id: k, nome: n.charAt(0).toUpperCase() + n.slice(1), v: this._n(k) };
+    }).sort((a, b) => (a.v ?? 999) - (b.v ?? 999));
+    return {
+      id: c.entita, nome: c.nome || v.attributes.friendly_name || 'Robot', st: v, rooms: v.attributes.rooms || {},
+      bat: c.batteria || sens.find((k) => /batteria|battery/.test(k)),
+      map: c.mappa || P('image')[0], station: c.stazione || sens.find((k) => /station_state|stato_stazione/.test(k)),
+      mop: c.mocio || P('binary_sensor')[0], water: c.acqua || P('number')[0],
+      buttons: P('button'), switches: P('switch'), selects: P('select'),
+      area: find('sensor', 'area_pulita'), dur: find('sensor', 'durata_pulizia'), tArea: find('sensor', 'area_totale_pulita'), tDur: find('sensor', 'total_cleaning_duration'), tN: find('sensor', 'pulizie_totali'),
+      parts,
+    };
+  }
+  _robotMini() {
+    const R = this._robot(); if (!R || R.missing) return '';
+    const s = R.st.state, run = ['cleaning', 'returning'].includes(s), b = this._n(R.bat);
+    const err = s === 'error';
+    return `<div class="card app ${run ? 'run' : ''} ${err ? 'err' : ''}" data-a="tab" data-t="robot"><div class="drum">${ic('mdi:robot-vacuum')}</div>
+      <div><div class="an">${esc(R.nome)}</div><div class="as">${esc(VAC_ST[s] || s)}</div></div><span class="sp"></span>${b != null ? `<b class="aw">${ic(b > 20 ? 'mdi:battery-high' : 'mdi:battery-low', 'xs')} ${fmt(b)}%</b>` : ''}</div>`;
+  }
+  _vRobot() {
+    const R = this._robot();
+    if (!R || R.missing) return `<div class="lockview card">${ic('mdi:robot-vacuum-off', 'lbig')}<div class="dt">Robot non trovato</div><div class="ds">Controlla "robot → entita" nella configurazione.</div></div>`;
+    const a = R.st.attributes, s = R.st.state, id = R.id;
+    const b = this._n(R.bat), run = s === 'cleaning', bc = b == null ? COL.sub : b <= 20 ? COL.bad : b <= 40 ? COL.warn : COL.ok;
+    const stn = this._v(R.station);
+    const fanL = (a.fan_speed_list || []);
+    const wt = this._st(R.water);
+    const btn = (svc, icon, label, cls = '') => `<button class="rb ${cls}" data-a="vac" data-s="${svc}" data-id="${id}">${ic(icon)}<span>${label}</span></button>`;
+    const status = `<div class="card rstat ${run ? 'run' : ''} ${s === 'error' ? 'err' : ''}">
+      <div class="rhead"><div class="rbot">${ic('mdi:robot-vacuum')}</div><div><div class="cn">${esc(R.nome)}</div><div class="rst">${esc(VAC_ST[s] || s)}</div>
+        <div class="sub small">${stn ? `Stazione: ${esc(STATION_ST[stn] || stn)}` : ''}${R.mop && this._st(R.mop) ? ` · Mocio ${this._on(R.mop) ? 'montato' : 'non montato'}` : ''}</div></div>
+        <span class="sp"></span><div class="rbat"><div class="rbv" style="color:${bc}">${fmt(b)}<small>%</small></div><div class="track thin"><i style="width:${b || 0}%;background:${bc}"></i></div></div></div>
+      <div class="rbtns">${run ? btn('pause', 'mdi:pause', 'Pausa', 'pri') : btn('start', 'mdi:play', s === 'paused' ? 'Riprendi' : 'Pulisci tutto', 'pri')}
+        ${btn('return_to_base', 'mdi:home-import-outline', 'Alla base')}${btn('stop', 'mdi:stop', 'Stop')}${btn('locate', 'mdi:map-marker-radius-outline', 'Trova')}</div>
+      ${fanL.length ? `<div class="rrow col"><span class="sub">Aspirazione</span><div class="seg">${fanL.map((f) => `<button class="${a.fan_speed === f ? 'on' : ''}" data-a="vac" data-s="set_fan_speed" data-id="${id}" data-v='${JSON.stringify({ fan_speed: f })}'>${esc(FAN_LBL[f] || f)}</button>`).join('')}</div></div>` : ''}
+      ${wt ? `<div class="rrow"><span class="sub">Acqua mocio</span><div class="wctl"><button class="kbtn" data-a="num" data-id="${R.water}" data-d="-5">−</button><b>${fmt(this._n(R.water))}</b><button class="kbtn" data-a="num" data-id="${R.water}" data-d="5">+</button><span class="sub small">/ ${fmt(wt.attributes.max)}</span></div></div>` : ''}
+    </div>`;
+    const mp = this._st(R.map);
+    const map = `<div class="card rmap" ${R.map ? `data-a="more" data-id="${R.map}"` : ''}><div class="cn">${ic('mdi:map-outline', 'xs')} Mappa${mp && mp.attributes.map_name ? ` · ${esc(mp.attributes.map_name)}` : ''}</div>
+      <div class="mapbox">${mp && mp.attributes.entity_picture ? `<img src="${esc(mp.attributes.entity_picture.startsWith('data:') ? mp.attributes.entity_picture : `${mp.attributes.entity_picture}${mp.attributes.entity_picture.includes('?') ? '&' : '?'}v=${encodeURIComponent(mp.state)}`)}">` : `<div class="nodata">Mappa non disponibile</div>`}</div></div>`;
+    const rk = Object.keys(R.rooms);
+    const rooms = `<div class="card"><div class="ch"><div class="cn">${ic('mdi:floor-plan', 'xs')} Pulisci stanze</div><span class="sp"></span><button class="pill pbtn" data-a="passes">${this._passes}× passata</button></div>
+      <div class="rgrid">${rk.map((k) => `<button class="rchip ${this._rooms.has(k) ? 'on' : ''}" data-a="room" data-k="${esc(k)}">${ic(ROOM_IC[k] || 'mdi:floor-plan')}<span>${esc(k.replace(/_/g, ' ').replace(/^./, (x) => x.toUpperCase()))}</span></button>`).join('') || '<div class="sub">Nessuna stanza dalla mappa</div>'}</div>
+      <button class="btn pri wide" data-a="rooms-go" ${this._rooms.size ? '' : 'disabled'}>${ic('mdi:robot-vacuum')} ${this._rooms.size ? `Pulisci ${this._rooms.size} ${this._rooms.size === 1 ? 'stanza' : 'stanze'}` : 'Seleziona le stanze'}</button></div>`;
+    const bts = R.buttons.map((k) => { const suf = k.slice(`button.${id.split('.')[1]}_`.length); const [l, i] = BTN_LBL[suf] || [this._name(k).replace(R.nome + ' ', ''), 'mdi:gesture-tap'];
+      return `<button class="sbtn" data-a="press" data-id="${k}" data-conf="0" data-label="${esc(l)}?">${ic(i)}<span>${esc(l)}</span></button>`; }).join('');
+    const sws = R.switches.map((k) => `<div class="kv"><span>${esc(this._name(k).replace(R.nome + ' ', ''))}</span><button class="tgl ${this._on(k) ? 'on' : ''}" data-a="toggle" data-id="${k}"><i></i></button></div>`).join('');
+    const sels = R.selects.map((k) => { const st = this._st(k); return `<div class="kv"><span>${esc(this._name(k).replace(R.nome + ' ', ''))}</span><div class="seg">${(st.attributes.options || []).map((o) => `<button class="${st.state === o ? 'on' : ''}" data-a="sel" data-id="${k}" data-o="${esc(o)}">${esc(o === 'auto' ? 'Sempre' : o === 'smart' ? 'Smart' : o)}</button>`).join('')}</div></div>`; }).join('');
+    const station = `<div class="card"><div class="cn">${ic('mdi:home-roof', 'xs')} Stazione</div><div class="sgrid">${bts}</div>${sws}${sels}</div>`;
+    const stat = (k, l, d = 0, u = '') => this._st(k) ? `<div class="st1"><b>${fmt(this._n(k), d)}<small>${u || esc(this._u(k))}</small></b><span>${l}</span></div>` : '';
+    const stats = `<div class="card"><div class="cn">${ic('mdi:chart-box-outline', 'xs')} Pulizie</div>
+      <div class="ctl sub small mt">Ultima</div><div class="sts">${stat(R.area, 'area')}${stat(R.dur, 'durata', 0, ' min')}</div>
+      <div class="ctl sub small">Totale</div><div class="sts">${stat(R.tArea, 'area')}${stat(R.tDur, 'ore', 0, ' h')}${stat(R.tN, 'pulizie', 0, ' ')}</div></div>`;
+    const colP = (v) => (v == null ? COL.sub : v <= 10 ? COL.bad : v <= 25 ? COL.warn : COL.ok);
+    const parts = `<div class="card rparts"><div class="cn">${ic('mdi:wrench-outline', 'xs')} Ricambi e manutenzione</div><div class="plist3">
+      ${R.parts.map((x) => `<div class="bat" data-a="more" data-id="${x.id}"><div class="bt"><span>${esc(x.nome)}</span><b style="color:${colP(x.v)}">${fmt(x.v)}%</b></div><div class="track thin"><i style="width:${x.v || 0}%;background:${colP(x.v)}"></i></div></div>`).join('')}</div></div>`;
+    return `<div class="g robot-g">${status}${map}${rooms}${station}${stats}${parts}</div>`;
+  }
+
   /* ===== MUSICA ===== */
   _spotifyId() { return this._cfg.musica.spotify || Object.keys(this._hass.states).find((k) => k.startsWith('media_player.spotify')); }
   _playSpotify(uri) {
@@ -630,15 +725,15 @@ class CasaPanel extends HTMLElement {
           <div class="npk">${ic('mdi:spotify', 'xs')} Spotify${a.source ? ` · ${esc(a.source)}` : ''}</div>
           <div class="npt">${idle ? 'Niente in riproduzione' : esc(a.media_title || '')}</div>
           <div class="npa">${idle ? 'Scegli una playlist o un dispositivo' : esc([a.media_artist, a.media_album_name].filter(Boolean).join(' · '))}</div>
-          ${dur ? `<div class="prog"><div class="track thin"><i style="width:${(pos / dur) * 100}%"></i></div><div class="pt"><span>${mmss(pos)}</span><span>${mmss(dur)}</span></div></div>` : ''}
-          <div class="ctrl">
+          ${dur && !idle ? `<div class="prog"><div class="track thin"><i style="width:${(pos / dur) * 100}%"></i></div><div class="pt"><span>${mmss(pos)}</span><span>${mmss(dur)}</span></div></div>` : ''}
+          ${idle ? `<div class="ctrl idle">${m.playlist.length ? `<button class="btn pri" data-a="pl" data-uri="${esc(m.playlist[0].uri)}">${ic('mdi:play')} ${esc(m.playlist[0].nome)}</button>` : ''}<span class="sub small">${m.playlist.length ? 'oppure tocca una playlist' : 'Avvia la musica dall\'app Spotify o aggiungi delle playlist'}</span></div>` : `<div class="ctrl">
             <button class="cb sm ${a.shuffle ? 'on' : ''}" data-a="mp" data-s="shuffle_set" data-id="${id}" data-v='${JSON.stringify({ shuffle: !a.shuffle })}'>${ic('mdi:shuffle-variant')}</button>
             <button class="cb" data-a="mp" data-s="media_previous_track" data-id="${id}">${ic('mdi:skip-previous')}</button>
             <button class="cb play" data-a="mp" data-s="media_play_pause" data-id="${id}">${ic(playing ? 'mdi:pause' : 'mdi:play')}</button>
             <button class="cb" data-a="mp" data-s="media_next_track" data-id="${id}">${ic('mdi:skip-next')}</button>
             <button class="cb sm ${a.repeat && a.repeat !== 'off' ? 'on' : ''}" data-a="mp" data-s="repeat_set" data-id="${id}" data-v='${JSON.stringify({ repeat: a.repeat === 'off' || !a.repeat ? 'all' : a.repeat === 'all' ? 'one' : 'off' })}'>${ic(a.repeat === 'one' ? 'mdi:repeat-once' : 'mdi:repeat')}</button>
-          </div>
-          ${vol != null ? `<div class="volr"><button class="cb sm" data-a="vol" data-id="${id}" data-d="-0.05">${ic('mdi:volume-minus')}</button><div class="track"><i style="width:${vol * 100}%"></i></div><button class="cb sm" data-a="vol" data-id="${id}" data-d="0.05">${ic('mdi:volume-plus')}</button><b>${fmt(vol * 100)}%</b></div>` : ''}
+          </div>`}
+          ${vol != null && !idle ? `<div class="volr"><button class="cb sm" data-a="vol" data-id="${id}" data-d="-0.05">${ic('mdi:volume-minus')}</button><div class="track"><i style="width:${vol * 100}%"></i></div><button class="cb sm" data-a="vol" data-id="${id}" data-d="0.05">${ic('mdi:volume-plus')}</button><b>${fmt(vol * 100)}%</b></div>` : ''}
         </div></div>`;
       if (srcs.length) sp += `<div class="card"><div class="cn">${ic('mdi:speaker-multiple', 'xs')} Riproduci su</div><div class="chips">${srcs.map((x) => `<button class="chip ${a.source === x ? 'on' : ''}" data-a="src" data-id="${id}" data-src="${esc(x)}">${ic(/echo|alexa/i.test(x) ? 'mdi:speaker' : /tv|fire/i.test(x) ? 'mdi:television' : /iphone/i.test(x) ? 'mdi:cellphone' : /ipad/i.test(x) ? 'mdi:tablet' : /mac|pc|web/i.test(x) ? 'mdi:laptop' : 'mdi:speaker-wireless', 'xs')}${esc(x)}</button>`).join('')}</div>
         <div class="sub small mt0">Se un dispositivo non compare, apri Spotify sul telefono e seleziona una volta quel dispositivo.</div></div>`;
@@ -670,7 +765,7 @@ class CasaPanel extends HTMLElement {
     const colB = (v) => (v <= 15 ? COL.bad : v <= 30 ? COL.warn : COL.ok);
     return `<div class="g avv-g">
       <div class="card"><div class="cn">Avvisi attivi <span class="cnt">${alerts.length}</span></div>
-        ${alerts.length ? alerts.map((a) => `<div class="alert ${a.l}" ${a.id ? `data-a="more" data-id="${a.id}"` : ''}>${ic(a.i)}<div><b>${esc(a.t)}</b><small>${esc(a.s || '')}</small></div></div>`).join('') : `<div class="alert ok">${ic('mdi:check-circle-outline')}<div><b>Nessun avviso</b><small>tutto regolare</small></div></div>`}</div>
+        ${alerts.length ? alerts.map((a) => `<div class="alert ${a.l}" ${a.id ? `data-a="more" data-id="${a.id}"` : a.go && a.go !== 'avvisi' ? `data-a="tab" data-t="${a.go}"` : ''}>${ic(a.i)}<div><b>${esc(a.t)}</b><small>${esc(a.s || '')}</small></div></div>`).join('') : `<div class="alert ok">${ic('mdi:check-circle-outline')}<div><b>Nessun avviso</b><small>tutto regolare</small></div></div>`}</div>
       <div class="card"><div class="cn">Batterie <span class="cnt">${bats.length}</span></div><div class="blist">
         ${bats.map((b) => `<div class="bat" data-a="more" data-id="${b.id}"><div class="bt"><span class="${b.v <= 15 ? 'bad' : ''}">${esc(b.name)}</span><b style="color:${colB(b.v)}">${fmt(b.v)}%</b></div><div class="track thin"><i style="width:${b.v}%;background:${colB(b.v)}"></i></div></div>`).join('') || '<div class="sub">Nessun sensore con batteria</div>'}</div></div>
       <div class="card"><div class="cn">Salute della casa</div>
@@ -686,12 +781,12 @@ class CasaPanel extends HTMLElement {
 
 /* ---------- stile ---------- */
 const CSS = `
-:host{display:block;--bg:#0a1426;--line:rgba(120,170,230,.14);--txt:#e9f2ff;--sub:#8ea3c0;--acc:#4fd1e8;--ok:#3ddc97;--warn:#f6b93b;--bad:#ff5d6c;--blue:#5aa9ff;
+:host{display:block;width:100%;max-width:100%;min-width:0;contain:inline-size;--bg:#0a1426;--line:rgba(120,170,230,.14);--txt:#e9f2ff;--sub:#8ea3c0;--acc:#4fd1e8;--ok:#3ddc97;--warn:#f6b93b;--bad:#ff5d6c;--blue:#5aa9ff;
   font-family:'Barlow','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--txt);-webkit-font-smoothing:antialiased}
 *{box-sizing:border-box}
 .wrap{min-height:100vh;height:100vh;display:flex;flex-direction:column;padding:14px;gap:14px;
   background:radial-gradient(1100px 600px at 15% -10%,#17325c 0%,transparent 60%),radial-gradient(900px 500px at 110% 110%,#0f2b45 0%,transparent 60%),linear-gradient(180deg,#0b1629,#070f1d)}
-.main{flex:1;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+.main{flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
 .main::-webkit-scrollbar{display:none}
 ha-icon{--mdc-icon-size:22px;display:inline-flex}
 ha-icon.xs{--mdc-icon-size:16px;opacity:.85;vertical-align:-2px}
@@ -724,7 +819,7 @@ button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;-webki
 .nodata{color:var(--sub);font-size:13px;padding:20px 0;text-align:center}
 .mt{margin-top:16px}
 /* casa */
-.casa{grid-template-columns:1.35fr 1fr 1fr}
+.casa{grid-template-columns:minmax(0,1.35fr) minmax(0,1fr) minmax(0,1fr)}
 .clock{display:flex;gap:20px;align-items:stretch}
 .dn{font-size:20px;font-weight:600} .dd{color:var(--sub);font-size:16px}
 .tm{font-size:84px;font-weight:700;line-height:1;letter-spacing:-2px;margin-top:10px}
@@ -759,7 +854,7 @@ ha-icon.wsm{--mdc-icon-size:22px;color:#ffd166} ha-icon.wmd{--mdc-icon-size:30px
 @keyframes spin{to{transform:rotate(360deg)}}
 .an{font-size:19px;font-weight:600} .as{font-size:21px;font-weight:700;color:#9fb3cf;white-space:nowrap} .app.run .as{color:var(--acc)} .aw{font-size:21px;white-space:nowrap}
 .app>div:nth-child(2){min-width:0}
-.power{display:grid;grid-template-columns:1fr 1.2fr;gap:22px}
+.power{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:22px}
 .pleft{display:flex;flex-direction:column;gap:10px}
 .pleft>div:nth-child(2){display:flex;flex-direction:column;gap:6px}
 .ring{width:64px;height:64px;border-radius:50%;border:3px solid var(--acc);display:flex;align-items:center;justify-content:center;box-shadow:0 0 20px rgba(79,209,232,.25)}
@@ -768,7 +863,7 @@ ha-icon.wsm{--mdc-icon-size:22px;color:#ffd166} ha-icon.wmd{--mdc-icon-size:30px
 .kv{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:15px}
 .kv[data-a]{cursor:pointer} .kv.sm{font-size:13px;padding:4px 0 4px 12px} .kv span{color:#c5d6ec}
 .pright{display:flex;flex-direction:column;justify-content:center;gap:10px;border-left:1px solid var(--line);padding-left:20px}
-.pbar{display:grid;grid-template-columns:120px 1fr 70px;align-items:center;gap:12px;font-size:15px;cursor:pointer;padding:4px 0}
+.pbar{display:grid;grid-template-columns:120px minmax(0,1fr) 70px;align-items:center;gap:12px;font-size:15px;cursor:pointer;padding:4px 0}
 .pbar span{color:#c5d6ec;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .pbar b{text-align:right}
 .track{height:9px;border-radius:6px;background:rgba(255,255,255,.07);overflow:hidden}
 .track.thin{height:4px}
@@ -803,9 +898,9 @@ ha-icon.rwm{position:absolute;right:-10px;bottom:-14px;--mdc-icon-size:110px;opa
 .pill.ok{background:rgba(61,220,151,.15)} .pill.warn{background:rgba(246,185,59,.15)} .pill.bad{background:rgba(255,93,108,.18)}
 .sic .kv b{font-size:14px}
 /* energia */
-.energia-g{grid-template-columns:1fr 1.2fr}
+.energia-g{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr)}
 .plist{margin-top:16px;display:flex;flex-direction:column;gap:8px}
-.ctab{display:grid;grid-template-columns:1.1fr 1fr 1fr;row-gap:16px;align-items:end;margin-bottom:12px}
+.ctab{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr) minmax(0,1fr);row-gap:16px;align-items:end;margin-bottom:12px}
 .ctab b{color:var(--sub);font-weight:500;text-align:right} .ctab>span{color:#c5d6ec;font-size:16px}
 .ctab div{text-align:right} .ctab .cost-v{color:#ff9f43} .ctab big{font-size:30px;font-weight:700;display:block} .ctab small{color:var(--sub);font-size:12px}
 .bchart{display:flex;align-items:flex-end;gap:4px;margin-top:14px;padding:0 2px;border-bottom:1px solid var(--line)}
@@ -828,8 +923,8 @@ ha-icon.lbig{}
 .pwr.on{background:rgba(61,220,151,.18);border-color:var(--ok)} .pwr.on ha-icon{color:var(--ok)}
 .prow{display:flex;align-items:center;gap:12px;margin-top:10px;font-size:16px}
 .kbtn{width:40px;height:40px;border-radius:12px;background:rgba(255,255,255,.06);border:1px solid var(--line);font-size:22px}
-.pur .pbar{grid-template-columns:60px 1fr 60px;margin-top:12px}
-.energia-g .pbar{grid-template-columns:110px 1fr 92px}
+.pur .pbar{grid-template-columns:60px minmax(0,1fr) 60px;margin-top:12px}
+.energia-g .pbar{grid-template-columns:110px minmax(0,1fr) 92px}
 /* comandi */
 .com-g{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
 .ctl-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
@@ -843,7 +938,7 @@ ha-icon.lbig{--mdc-icon-size:64px;color:var(--acc)}
 .btn.ghost{border:1px solid var(--line);background:rgba(255,255,255,.04)}
 .btn.sm{padding:8px 14px;font-size:14px}
 /* avvisi */
-.avv-g{grid-template-columns:1fr 1.3fr 1.2fr}
+.avv-g{grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) minmax(0,1.2fr)}
 .alert{display:flex;gap:12px;align-items:center;padding:14px;border-radius:16px;margin-top:12px;background:rgba(255,255,255,.04);border:1px solid var(--line);border-left:4px solid var(--acc)}
 .alert b{display:block;font-size:16px} .alert small{color:var(--sub);font-size:13px}
 .alert.warn{border-left-color:var(--warn);background:rgba(246,185,59,.09)} .alert.warn ha-icon{color:var(--warn)}
@@ -852,8 +947,41 @@ ha-icon.lbig{--mdc-icon-size:64px;color:var(--acc)}
 .blist{display:flex;flex-direction:column;gap:9px;margin-top:12px;max-height:70vh;overflow:auto}
 .bat{cursor:pointer} .bt{display:flex;justify-content:space-between;font-size:15px;margin-bottom:4px}
 .bignum{display:flex;gap:14px;align-items:center;margin:20px 0 10px} .bignum b{font-size:48px} .bignum span{font-size:14px}
+/* robot */
+.robot-g{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) minmax(0,1fr)}
+.rstat{grid-column:1;grid-row:1} .rmap{grid-column:2;grid-row:1/3;display:flex;flex-direction:column} .rparts{grid-column:1/-1}
+.rstat.run{border-color:rgba(79,209,232,.6);box-shadow:0 0 24px rgba(79,209,232,.15)} .rstat.err,.app.err{border-color:rgba(255,93,108,.6)}
+.rhead{display:flex;gap:14px;align-items:center}
+.rbot{width:58px;height:58px;border-radius:50%;background:linear-gradient(180deg,#e8f3ff,#b9d3ef);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.rbot ha-icon{--mdc-icon-size:34px;color:#1d5fa8} .rstat.run .rbot ha-icon{animation:spin 3s linear infinite}
+.rst{font-size:22px;font-weight:700;color:var(--acc);margin:2px 0}
+.rbat{width:84px;text-align:right} .rbv{font-size:34px;font-weight:700;line-height:1} .rbv small{font-size:16px} .rbat .track{margin-top:6px}
+.rbtns{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:16px 0 6px}
+.rb{display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 4px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid var(--line);font-size:12px}
+.rb ha-icon{--mdc-icon-size:24px} .rb.pri{background:linear-gradient(180deg,#4fd1e8,#2aa6c4);color:#06202a;border-color:transparent;font-weight:600}
+.rrow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;font-size:14px}
+.rrow.col{flex-direction:column;align-items:stretch;gap:6px} .rrow.col .seg button{flex:1}
+.wctl{display:flex;align-items:center;gap:10px} .wctl .kbtn{width:36px;height:36px;font-size:20px}
+.mapbox{flex:1;min-height:220px;margin-top:10px;border-radius:14px;background:#0a1322;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.mapbox img{max-width:100%;max-height:100%;object-fit:contain}
+.pbtn{cursor:pointer;color:var(--txt)}
+.rgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin:12px 0}
+.rchip{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--line);font-size:14px;text-align:left}
+.rchip span{line-height:1.15} .rchip ha-icon{--mdc-icon-size:20px;color:var(--sub);flex-shrink:0}
+.rchip.on{border-color:var(--acc);background:rgba(79,209,232,.12)} .rchip.on ha-icon{color:var(--acc)}
+.btn.wide{width:100%;justify-content:center} .btn[disabled]{opacity:.4}
+.sgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0 6px}
+.sbtn{display:flex;align-items:center;gap:8px;padding:11px 12px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--line);font-size:14px;text-align:left}
+.sbtn ha-icon{--mdc-icon-size:20px;color:var(--acc)} .sbtn:active,.rb:active,.rchip:active{transform:scale(.97)}
+.tgl{width:50px;height:30px;border-radius:15px;background:rgba(255,255,255,.12);position:relative;flex-shrink:0}
+.tgl i{position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:50%;background:#cfe0f5;transition:.2s} .tgl.on{background:var(--ok)} .tgl.on i{left:23px;background:#fff}
+.sts{display:flex;gap:18px;margin:4px 0 12px;flex-wrap:wrap}
+.st1 b{font-size:28px;display:block;line-height:1.1} .st1 b small{font-size:14px;color:var(--sub);margin-left:3px;font-weight:500} .st1 span{font-size:12px;color:var(--sub)}
+.plist3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 26px;margin-top:12px}
+@media (max-width:1000px){.robot-g{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.rstat{grid-column:1;grid-row:auto}.rmap{grid-column:2;grid-row:auto}.plist3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:700px){.robot-g{grid-template-columns:minmax(0,1fr)}.rstat,.rmap{grid-column:auto}.plist3{grid-template-columns:minmax(0,1fr)}}
 /* musica */
-.mus-g{grid-template-columns:1.15fr 1fr}
+.mus-g{grid-template-columns:minmax(0,1.15fr) minmax(0,1fr)}
 .mcol{display:flex;flex-direction:column;gap:14px;min-width:0}
 .np{display:flex;gap:22px;align-items:stretch}
 .np.empty{flex-direction:column;align-items:center;text-align:center;padding:40px 30px;gap:10px}
@@ -869,11 +997,11 @@ ha-icon.spbig{--mdc-icon-size:72px;color:#1db954}
 .cb{width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);border:1px solid var(--line)}
 .cb ha-icon{--mdc-icon-size:28px} .cb.sm{width:40px;height:40px} .cb.sm ha-icon{--mdc-icon-size:20px;color:var(--sub)} .cb.sm.on ha-icon{color:#1db954}
 .cb.play{width:66px;height:66px;background:#1db954;border-color:#1db954} .cb.play ha-icon{--mdc-icon-size:34px;color:#04130a}
-.volr{display:grid;grid-template-columns:40px 1fr 40px 46px;align-items:center;gap:10px;margin-top:10px;max-width:400px} .volr b{font-size:14px;text-align:right}
+.volr{display:grid;grid-template-columns:40px minmax(0,1fr) 40px 46px;align-items:center;gap:10px;margin-top:10px;max-width:400px} .volr b{font-size:14px;text-align:right}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 8px}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:10px 14px;border-radius:14px;background:rgba(255,255,255,.05);border:1px solid var(--line);font-size:14px}
 .chip.on{border-color:#1db954;background:rgba(29,185,84,.14)} .chip.on ha-icon{color:#1db954}
-.mt0{margin-top:4px}
+.mt0{margin-top:4px} .ctrl.idle{justify-content:flex-start;gap:14px;flex-wrap:wrap;max-width:none}
 .plg{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:12px}
 .pl{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:16px;background:rgba(255,255,255,.04);border:1px solid var(--line);text-align:left}
 .pl img,.plic{width:100%;aspect-ratio:1;border-radius:12px;object-fit:cover;display:flex;align-items:center;justify-content:center}
@@ -906,18 +1034,18 @@ ha-icon.dlg-ic{--mdc-icon-size:40px;color:var(--acc)}
 .key:active{background:rgba(79,209,232,.25)} .key.kok{background:rgba(79,209,232,.2);border-color:rgba(79,209,232,.6)}
 .row2{display:flex;gap:12px;margin-top:14px}
 /* responsive */
-@media (max-width:1250px){.tb span{display:none}.tb{padding:11px 14px}.avv-g{grid-template-columns:1fr 1fr}}
-@media (max-width:1000px){.casa{grid-template-columns:1fr 1fr}.casa .span3,.casa .span2{grid-column:1/-1}.apps{grid-row:auto;grid-column:1/-1;flex-direction:row}.apps>.app{flex:1;min-width:0}.casa .clock{grid-column:1/-1}.rooms{grid-template-columns:1fr 1fr}.cam-g{grid-template-columns:1fr 1fr}}
-@media (max-width:700px){.wrap{padding:8px;gap:10px}.apps{flex-direction:column}.g,.casa,.energia-g,.avv-g,.cam-g{grid-template-columns:1fr}.span2,.span3{grid-column:auto}
-  .power{grid-template-columns:1fr}.pright{border-left:0;padding-left:0}.clock{flex-direction:column}.greet{border-left:0;padding-left:0;border-top:1px solid var(--line);padding-top:12px}
-  .tm{font-size:64px}.big{font-size:48px}.wx{flex-direction:column;align-items:stretch}.wxnow{border-right:0;padding-right:0}.pbar{grid-template-columns:100px 1fr 64px}
+@media (max-width:1250px){.tb span{display:none}.tb{padding:11px 14px}.avv-g{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+@media (max-width:1000px){.casa{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.casa .span3,.casa .span2{grid-column:1/-1}.apps{grid-row:auto;grid-column:1/-1;flex-direction:row}.apps>.app{flex:1;min-width:0}.casa .clock{grid-column:1/-1}.rooms{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.cam-g{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
+@media (max-width:700px){.wrap{padding:8px;gap:10px}.apps{flex-direction:column}.g,.casa,.energia-g,.avv-g,.cam-g{grid-template-columns:minmax(0,1fr)}.span2,.span3{grid-column:auto}
+  .power{grid-template-columns:minmax(0,1fr)}.pright{border-left:0;padding-left:0}.clock{flex-direction:column}.greet{border-left:0;padding-left:0;border-top:1px solid var(--line);padding-top:12px}
+  .tm{font-size:64px}.big{font-size:48px}.wx{flex-direction:column;align-items:stretch}.wxnow{border-right:0;padding-right:0}.pbar{grid-template-columns:100px minmax(0,1fr) 64px}
   .nav{justify-content:space-between}.tb{padding:10px}}
 /* ===== iPad Air 10,5" (1112x834) e iPad 10,2"/10,9" in orizzontale ===== */
 @media (min-width:1001px) and (max-width:1199px){
   .wrap{padding:10px;gap:10px} .g{gap:12px}
   .tb span{display:inline} .tb{padding:9px 11px;font-size:15px;gap:6px} .tb ha-icon{--mdc-icon-size:20px} .tb.ico{padding:9px 10px}
   .card{padding:14px 16px;border-radius:20px}
-  .casa{grid-template-columns:1.3fr 1fr .95fr}
+  .casa{grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,.95fr)}
   .clock{gap:14px} .tm{font-size:66px;margin-top:6px} .dn{font-size:18px} .dd{font-size:14px} .greet{padding-left:14px;gap:8px} .gh{font-size:15px}
   .person{padding:6px 8px} .person img,.person .pi{width:30px;height:30px}
   .wx{gap:12px} .wxnow{gap:8px;padding-right:12px} .wt{font-size:42px} ha-icon.wbig{--mdc-icon-size:44px} .hr{font-size:13px} ha-icon.wsm{--mdc-icon-size:20px}
@@ -926,22 +1054,23 @@ ha-icon.dlg-ic{--mdc-icon-size:40px;color:var(--acc)}
   .strip{padding:11px 14px;font-size:15px}
   .apps{gap:12px} .app{min-height:0;gap:12px} .drum{width:50px;height:50px} .drum ha-icon{--mdc-icon-size:30px} .an{font-size:16px} .as{font-size:18px} .aw{font-size:17px}
   .power{gap:16px} .ring{width:48px;height:48px} .ring ha-icon{--mdc-icon-size:24px} .big{font-size:48px} .big small{font-size:22px} .kv{font-size:14px;padding:6px 0}
-  .pbar{grid-template-columns:96px 1fr 62px;font-size:14px;gap:10px} .pright{padding-left:16px;gap:8px}
+  .pbar{grid-template-columns:96px minmax(0,1fr) 62px;font-size:14px;gap:10px} .pright{padding-left:16px;gap:8px}
   .rooms{gap:12px} .room{min-height:118px;padding:12px 14px} .rn{font-size:15px} .rt{font-size:36px;margin:4px 0 2px} .rm{font-size:13px;gap:10px} ha-icon.rwm{--mdc-icon-size:86px}
   .quick{gap:12px} .qb{min-height:72px;border-radius:18px} .qb ha-icon{--mdc-icon-size:24px} .qb b{font-size:15px}
   .clima-g{grid-template-columns:repeat(3,minmax(0,1fr))} .ct{font-size:46px} .cbig{gap:14px;margin:4px 0 6px} .cside{font-size:13px} .chart{height:72px} .seg button{padding:5px 8px;font-size:12px}
-  .energia-g .pbar{grid-template-columns:96px 1fr 84px} .ctab big{font-size:26px}
+  .energia-g .pbar{grid-template-columns:96px minmax(0,1fr) 84px} .ctab big{font-size:26px}
   .aria-g{grid-template-columns:repeat(2,minmax(0,1fr))}
   .com-g{grid-template-columns:repeat(3,minmax(0,1fr))}
   .art{width:180px;height:180px} .npt{font-size:22px} .cb{width:46px;height:46px} .cb.play{width:58px;height:58px}
   .plg{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .plist3{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 20px} .rbtns{margin:12px 0 4px} .rb{padding:8px 4px} .mapbox{min-height:180px} .st1 b{font-size:24px} .sts{margin:2px 0 8px}
 }
 /* iPad in verticale (834x1112) */
 @media (min-width:701px) and (max-width:1000px){
-  .mus-g{grid-template-columns:1fr} .clima-g,.aria-g{grid-template-columns:1fr 1fr} .com-g{grid-template-columns:1fr 1fr}
+  .mus-g{grid-template-columns:minmax(0,1fr)} .clima-g,.aria-g{grid-template-columns:minmax(0,1fr) minmax(0,1fr)} .com-g{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
   .tm{font-size:72px}
 }
-@media (max-width:700px){.mus-g{grid-template-columns:1fr}.np{flex-direction:column;align-items:center}.art{width:100%;height:auto;aspect-ratio:1}}
+@media (max-width:700px){.mus-g{grid-template-columns:minmax(0,1fr)}.np{flex-direction:column;align-items:center}.art{width:100%;height:auto;aspect-ratio:1}}
 
 `;
 
