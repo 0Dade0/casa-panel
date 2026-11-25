@@ -4,7 +4,7 @@
  * Copiare in  homeassistant/www/casa-panel.js  (sulla scheda dell'AI Hub)
  * Risorsa:    /local/casa-panel.js?v=1   (tipo: Modulo JavaScript)
  */
-const CP_VERSION = '1.4.0';
+const CP_VERSION = '1.5.0';
 
 /* ---------- utilità ---------- */
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -247,10 +247,22 @@ class CasaPanel extends HTMLElement {
     this._onResize = () => { this._fitKey = ''; this._render(true); };
     window.addEventListener('resize', this._onResize);
     window.addEventListener('orientationchange', this._onResize);
+    // "tocca per riaccendere": segnala ad HA che qualcuno sta usando il tablet
+    this._root.addEventListener('pointerdown', () => this._touch(), { capture: true, passive: true });
     this._root.addEventListener('click', (e) => {
       const el = e.composedPath().find((n) => n.dataset && n.dataset.a);
       if (el) { e.stopPropagation(); this._act(el.dataset.a, el.dataset); }
     });
+  }
+
+  _touch() {
+    const btn = this._cfg && this._cfg.tocco; if (!btn || !this._hass || !this._st(btn)) return;
+    const users = (this._cfg.tocco_utenti || ['tablet']).map((u) => String(u).toLowerCase());
+    const me = String((this._hass.user && this._hass.user.name) || '').toLowerCase();
+    if (users.length && !users.includes(me)) return;
+    const now = Date.now(); if (this._lastTouch && now - this._lastTouch < 15000) return;
+    this._lastTouch = now;
+    this._hass.callService('input_button', 'press', { entity_id: btn }).catch(() => {});
   }
 
   /* ----- azioni ----- */
