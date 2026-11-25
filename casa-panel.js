@@ -4,7 +4,7 @@
  * Copiare in  homeassistant/www/casa-panel.js  (sulla scheda dell'AI Hub)
  * Risorsa:    /local/casa-panel.js?v=1   (tipo: Modulo JavaScript)
  */
-const CP_VERSION = '1.3.0';
+const CP_VERSION = '1.4.0';
 
 /* ---------- utilità ---------- */
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -160,7 +160,7 @@ class CasaPanel extends HTMLElement {
     const c = this._cfg, ids = new Set();
     const add = (x) => x && ids.add(x);
     c.stanze.forEach((r) => ['temperatura', 'umidita', 'co2', 'pm25'].forEach((k) => add(r[k])));
-    c.elettrodomestici.forEach((a) => { add(a.potenza); add(a.presa); });
+    c.elettrodomestici.forEach((a) => { add(a.potenza); add(a.presa); add(a.stato); });
     c.consumi.forEach((x) => add(x.entita));
     c.energia.forEach((x) => add(x.entita));
     c.purificatori.forEach((p) => { add(p.ventola); add(p.pm25); add(p.filtro); });
@@ -285,6 +285,8 @@ class CasaPanel extends HTMLElement {
       case 'num': { const st = this._st(d.id); if (!st) break; const a = st.attributes; const v = Math.min(a.max ?? 100, Math.max(a.min ?? 0, Number(st.state) + Number(d.d)));
         this._guard(() => h.callService('number', 'set_value', { entity_id: d.id, value: v })); break; }
       case 'sel': this._guard(() => h.callService('select', 'select_option', { entity_id: d.id, option: d.o })); break;
+      case 'ack': { const st = this._st(d.id); if (!st) break; const opts = st.attributes.options || []; const off = opts.find((o) => /ferm|spent|vuot|off/i.test(o)) || opts[0];
+        h.callService('input_select', 'select_option', { entity_id: d.id, option: off }); break; }
       case 'confirm-yes': { const p = this._pending; this._pending = null; this._modal = null; this._renderModal(); if (p) p(); break; }
     }
   }
@@ -341,6 +343,14 @@ class CasaPanel extends HTMLElement {
     }
   }
 
+  /* ----- elettrodomestici: fine ciclo ----- */
+  _appDone(a) {
+    const st = a.stato && this._st(a.stato); if (!st) return null;
+    if (!/scaric/i.test(st.state)) return null;
+    const t = Date.parse(st.last_changed); const m = isNaN(t) ? null : Math.max(0, Math.round((Date.now() - t) / 60000));
+    return { min: m, txt: m == null ? '' : m < 60 ? `da ${m} min` : `da ${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}` };
+  }
+
   /* ----- adatta allo schermo ----- */
   _fit() {
     // 1) altezza esatta dello spazio visibile (evita lo scorrimento esterno su iPad)
@@ -389,6 +399,8 @@ class CasaPanel extends HTMLElement {
     const off = this._configuredIds().filter((id) => !this._ok(id));
     if (off.length) A.push({ l: 'warn', i: 'mdi:lan-disconnect', t: `${off.length} ${off.length === 1 ? 'dispositivo non raggiungibile' : 'dispositivi non raggiungibili'}`, s: off.slice(0, 3).map((id) => this._name(id)).join(', '), go: 'avvisi' });
     const upd = Object.values(this._hass.states).filter((x) => x.entity_id.startsWith('update.') && x.state === 'on');
+    c.elettrodomestici.forEach((a) => { const dn = !(this._n(a.potenza) > (a.soglia ?? 5)) && this._appDone(a);
+      if (dn) A.push({ l: 'done', i: 'mdi:basket-check', t: `${a.nome}: ciclo finito, da scaricare`, s: dn.txt, id: a.stato }); });
     const R = this._robot();
     if (R) {
       if (this._v(R.id) === 'error') A.push({ l: 'bad', i: 'mdi:robot-vacuum-alert', t: `${R.nome}: errore`, s: 'Controlla il robot', go: 'robot' });
@@ -396,7 +408,7 @@ class CasaPanel extends HTMLElement {
       if (worn.length) A.push({ l: 'info', i: 'mdi:wrench-outline', t: `${R.nome}: ${worn.length === 1 ? 'un ricambio' : worn.length + ' ricambi'} da sostituire`, s: worn.map((x) => `${x.nome} ${fmt(x.v)}%`).join(', '), go: 'robot' });
     }
     if (upd.length) A.push({ l: 'info', i: 'mdi:update', t: upd.length === 1 ? '1 aggiornamento disponibile' : `${upd.length} aggiornamenti disponibili`, s: upd.slice(0, 2).map((x) => x.attributes.friendly_name).join(', '), go: 'avvisi' });
-    const rank = { bad: 0, warn: 1, info: 2 };
+    const rank = { bad: 0, done: 1, warn: 2, info: 3 };
     return A.sort((a, b) => rank[a.l] - rank[b.l]);
   }
 
@@ -475,6 +487,10 @@ class CasaPanel extends HTMLElement {
       let mins = null;
       const hs = this._h(a.potenza, 12);
       if (run && hs) { let start = null; for (let i = hs.length - 1; i > 0; i--) { if (hs[i].v > (a.soglia ?? 5) && hs[i - 1].v <= (a.soglia ?? 5)) { start = hs[i].t; break; } } if (start) mins = Math.round((Date.now() - start) / 60000); }
+      const done = !run && this._appDone(a);
+      if (done) return `<div class="card app done" data-a="more" data-id="${a.stato}"><div class="drum">${ic('mdi:basket-check')}</div>
+        <div><div class="an">${esc(a.nome)}</div><div class="as">Da scaricare</div><div class="asub">finito ${esc(done.txt)}</div></div><span class="sp"></span>
+        <button class="ackb" data-a="ack" data-id="${a.stato}">${ic('mdi:check')}<span>Scaricato</span></button></div>`;
       return `<div class="card app ${run ? 'run' : ''}" data-a="more" data-id="${a.potenza}"><div class="drum">${ic(a.icona || 'mdi:washing-machine')}</div>
         <div><div class="an">${esc(a.nome)}</div><div class="as">${run ? `In funzione${mins != null ? ` · ${mins}'` : ''}` : this._ok(a.potenza) ? 'Spento' : 'Non raggiungibile'}</div></div><span class="sp"></span>${run ? `<b class="aw">${fmt(p)} W</b>` : ''}</div>`;
     }).join('');
@@ -877,6 +893,15 @@ ha-icon.wsm{--mdc-icon-size:22px;color:#ffd166} ha-icon.wmd{--mdc-icon-size:30px
 @keyframes pulse{50%{box-shadow:0 0 0 6px rgba(255,93,108,.15)}}
 .apps{grid-row:span 2;display:flex;flex-direction:column;gap:14px}
 .app{display:flex;align-items:center;gap:16px;flex:1;min-height:96px}
+.app.done{border-color:rgba(61,220,151,.75);background:linear-gradient(160deg,rgba(28,92,70,.85),rgba(15,40,40,.9));animation:doneglow 2.4s ease-in-out infinite}
+@keyframes doneglow{50%{box-shadow:0 0 28px rgba(61,220,151,.35)}}
+.app.done .drum{background:linear-gradient(180deg,#5ef0b0,#22a873)} .app.done .drum ha-icon{color:#05261a}
+.app.done .as{color:var(--ok)} .asub{font-size:12px;color:#bfe9d6;margin-top:2px;white-space:nowrap}
+.ackb{display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 12px;border-radius:14px;background:rgba(61,220,151,.18);border:1px solid rgba(61,220,151,.6);font-size:12px;font-weight:600;flex-shrink:0}
+.ackb ha-icon{--mdc-icon-size:22px;color:var(--ok)}
+.strip.done{background:linear-gradient(90deg,rgba(61,220,151,.22),rgba(61,220,151,.05));border-color:rgba(61,220,151,.5);border-left:4px solid var(--ok)} .strip.done>ha-icon{color:var(--ok)}
+.alert.done{border-left-color:var(--ok);background:rgba(61,220,151,.1)} .alert.done ha-icon{color:var(--ok)}
+.badge.done{background:var(--ok)}
 .drum{width:62px;height:62px;border-radius:16px;background:linear-gradient(180deg,#3a4a63,#26344b);display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .drum ha-icon{--mdc-icon-size:36px;color:#9fb3cf}
 .app.run{border-color:rgba(79,209,232,.6);box-shadow:0 0 24px rgba(79,209,232,.15),inset 0 1px 0 rgba(255,255,255,.05)}
