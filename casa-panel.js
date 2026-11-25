@@ -4,7 +4,7 @@
  * Copiare in  homeassistant/www/casa-panel.js  (sulla scheda dell'AI Hub)
  * Risorsa:    /local/casa-panel.js?v=1   (tipo: Modulo JavaScript)
  */
-const CP_VERSION = '1.2.0';
+const CP_VERSION = '1.3.0';
 
 /* ---------- utilità ---------- */
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -132,6 +132,7 @@ class CasaPanel extends HTMLElement {
     }
   }
   disconnectedCallback() {
+    if (this._onResize) { window.removeEventListener('resize', this._onResize); window.removeEventListener('orientationchange', this._onResize); }
     clearInterval(this._timer); this._timer = null;
     if (this._wxSub) { this._wxSub.forEach((u) => u && u.then && u.then((f) => f && f())); this._wxSub = null; }
   }
@@ -242,6 +243,10 @@ class CasaPanel extends HTMLElement {
     this._main = this._root.querySelector('.main');
     this._mh = this._root.querySelector('.modal-host');
     this._dock = this._root.querySelector('.dock');
+    this._wrap = this._root.querySelector('.wrap');
+    this._onResize = () => { this._fitKey = ''; this._render(true); };
+    window.addEventListener('resize', this._onResize);
+    window.addEventListener('orientationchange', this._onResize);
     this._root.addEventListener('click', (e) => {
       const el = e.composedPath().find((n) => n.dataset && n.dataset.a);
       if (el) { e.stopPropagation(); this._act(el.dataset.a, el.dataset); }
@@ -301,17 +306,22 @@ class CasaPanel extends HTMLElement {
   async _key(k) {
     if (k === 'del') this._pin = this._pin.slice(0, -1);
     else if (k === 'ok') return this._submitPin();
-    else if (this._pin.length < 8) this._pin += k;
+    else if (this._pin.length < 16) this._pin += k;
     this._pinErr = ''; this._renderModal();
   }
   async _submitPin() {
     const code = this._pin; this._pin = '';
     this._pinErr = 'Verifica…'; this._renderModal();
-    try { await this._hass.callService('alarm_control_panel', 'alarm_disarm', { entity_id: this._cfg.blocco, code }); }
-    catch (e) { this._pinErr = 'Codice errato'; this._renderModal(); return; }
+    try { await this._hass.callService('alarm_control_panel', 'alarm_disarm', { entity_id: this._cfg.blocco, code: String(code) }, undefined, false); }
+    catch (e) {
+      const msg = String((e && (e.message || e.code)) || e || '');
+      console.warn('casa-panel disarm error', e);
+      this._pinErr = /code|codice|invalid|non valid|wrong|errat/i.test(msg) ? `Codice errato (${code.length} cifre)` : `Errore: ${msg.slice(0, 90)}`;
+      this._renderModal(); return;
+    }
     const t0 = Date.now();
-    while (Date.now() - t0 < 3000 && this._locked()) await new Promise((r) => setTimeout(r, 200));
-    if (this._locked()) { this._pinErr = 'Codice errato'; this._renderModal(); return; }
+    while (Date.now() - t0 < 8000 && this._locked()) await new Promise((r) => setTimeout(r, 200));
+    if (this._locked()) { this._pinErr = `Non sbloccato: stato "${this._v(this._cfg.blocco)}" (${code.length} cifre)`; this._renderModal(); return; }
     const p = this._pending; this._pending = null; this._modal = null; this._pinErr = ''; this._renderModal(); this._render(true);
     if (p) p();
   }
@@ -328,6 +338,25 @@ class CasaPanel extends HTMLElement {
     } else {
       this._mh.innerHTML = `<div class="modal"><div class="dlg">${ic('mdi:help-circle-outline', 'dlg-ic')}<div class="dt">${esc(this._modal.label || 'Confermi?')}</div>
         <div class="ds">Vuoi davvero procedere?</div><div class="row2"><button class="btn ghost" data-a="close">Annulla</button><button class="btn pri" data-a="confirm-yes">Conferma</button></div></div></div>`;
+    }
+  }
+
+  /* ----- adatta allo schermo ----- */
+  _fit() {
+    // 1) altezza esatta dello spazio visibile (evita lo scorrimento esterno su iPad)
+    const top = Math.max(0, this.getBoundingClientRect().top);
+    const vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight;
+    if (vh - top > 300) this._wrap.style.height = `${Math.floor(vh - top)}px`;
+    // 2) se la pagina sfora di poco, la rimpicciolisce quanto basta (max -20%)
+    const v = this._main.firstElementChild; if (!v) return;
+    if (this._cfg.adatta_schermo === false || window.innerWidth <= 700) { v.style.zoom = ''; return; }
+    const key = `${this._tab}|${this._main.clientWidth}x${this._main.clientHeight}`;
+    if (key !== this._fitKey) { this._fitKey = key; this._z = 1; }
+    v.style.zoom = this._z === 1 ? '' : this._z;
+    const avail = this._main.clientHeight, h = this._main.scrollHeight;
+    if (h > avail + 1) {
+      const z = Math.floor(this._z * (avail / h) * 1000) / 1000;
+      if (z >= (this._cfg.zoom_minimo ?? 0.8)) { this._z = z; v.style.zoom = z; }
     }
   }
 
@@ -387,13 +416,14 @@ class CasaPanel extends HTMLElement {
       + `<button class="tb ico ${this._tab === 'avvisi' ? 'on' : ''}" data-a="tab" data-t="avvisi">${ic('mdi:bell-outline')}${alerts.length ? `<b class="badge ${alerts[0].l}">${alerts.length}</b>` : ''}</button>`;
     const fn = { casa: this._vCasa, clima: this._vClima, energia: this._vEnergia, telecamere: this._vCam, aria: this._vAria, comandi: this._vComandi, musica: this._vMusica, robot: this._vRobot, avvisi: this._vAvvisi }[this._tab] || this._vCasa;
     this._main.innerHTML = `<section class="view v-${this._tab}">${fn.call(this, alerts)}</section>`;
+    this._fit();
   }
 
   /* ===== CASA ===== */
   _vCasa(alerts) {
     const c = this._cfg, now = new Date();
     const hhmm = now.toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
-    const people = Object.values(this._hass.states).filter((s) => s.entity_id.startsWith('person.'));
+    const people = c.persone ? c.persone.map((id) => this._st(id)).filter(Boolean) : Object.values(this._hass.states).filter((s) => s.entity_id.startsWith('person.') && !['unknown', 'unavailable'].includes(s.state));
     const ppl = people.map((p) => {
       const home = p.state === 'home';
       const pic = p.attributes.entity_picture;
@@ -784,7 +814,7 @@ const CSS = `
 :host{display:block;width:100%;max-width:100%;min-width:0;contain:inline-size;--bg:#0a1426;--line:rgba(120,170,230,.14);--txt:#e9f2ff;--sub:#8ea3c0;--acc:#4fd1e8;--ok:#3ddc97;--warn:#f6b93b;--bad:#ff5d6c;--blue:#5aa9ff;
   font-family:'Barlow','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--txt);-webkit-font-smoothing:antialiased}
 *{box-sizing:border-box}
-.wrap{min-height:100vh;height:100vh;display:flex;flex-direction:column;padding:14px;gap:14px;
+.wrap{height:100vh;display:flex;flex-direction:column;padding:14px;gap:14px;
   background:radial-gradient(1100px 600px at 15% -10%,#17325c 0%,transparent 60%),radial-gradient(900px 500px at 110% 110%,#0f2b45 0%,transparent 60%),linear-gradient(180deg,#0b1629,#070f1d)}
 .main{flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;scrollbar-width:none}
 .main::-webkit-scrollbar{display:none}
@@ -1028,7 +1058,7 @@ ha-icon.spbig{--mdc-icon-size:72px;color:#1db954}
 ha-icon.dlg-ic{--mdc-icon-size:40px;color:var(--acc)}
 .dt{font-size:22px;font-weight:700} .ds{color:var(--sub);font-size:14px;text-align:center}
 .dots{display:flex;gap:12px;margin:12px 0 2px} .dots i{width:14px;height:14px;border-radius:50%;border:2px solid #5a7091} .dots i.f{background:var(--acc);border-color:var(--acc)}
-.err{min-height:18px;color:var(--bad);font-size:13px}
+.err{min-height:18px;color:var(--bad);font-size:13px;text-align:center;max-width:300px}
 .kp{display:grid;grid-template-columns:repeat(3,74px);gap:12px;margin:4px 0 12px}
 .key{height:74px;border-radius:50%;background:rgba(255,255,255,.06);border:1px solid var(--line);font-size:28px;font-weight:600;display:flex;align-items:center;justify-content:center}
 .key:active{background:rgba(79,209,232,.25)} .key.kok{background:rgba(79,209,232,.2);border-color:rgba(79,209,232,.6)}
